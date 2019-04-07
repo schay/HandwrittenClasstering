@@ -1,0 +1,280 @@
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <input type="file" id="selectfile" accept='image/*'>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bulma/0.6.2/css/bulma.min.css">
+</head>
+
+<div id="text_input">入力画像</div>
+<div id="input" style="border: none; margin: 30px; background-color: #f8f8f8; min-height: 40px;"></div>
+<div id="text_binaly">2値化後の画像</div>
+<div id="binary" style="border: none; margin: 30px; background-color: #f8f8f8; min-height: 40px;"></div>
+<div id="text_read">...読み込み中</div>
+
+<canvas id="draw-area" width="256" height="256" style="border: 2px solid;"></canvas>
+<p class="control">
+  <a id="predict-button" class="button is-link is-loading" onclick="clickPredict()">
+    Predict
+  </a>
+</p>
+<p class="control">
+  <a class="button" onclick="clickReset()">
+    Reset
+  </a>
+</p>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/signature_pad/1.5.3/signature_pad.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@0.13.3/dist/tf.min.js"></script>
+<script src="encoding.js"></script>
+<script>
+  const width = 64;
+  const height = 63;
+  // init SignaturePad
+  const drawElement = document.getElementById('draw-area');
+  const signaturePad = new SignaturePad(drawElement, {
+    minWidth: 6,
+    maxWidth: 6,
+    penColor: 'black',
+    backgroundColor: 'white',
+  });
+
+  // モデルの読み込み
+  let model;
+  tf.loadModel('model/model.json')
+    .then(pretrainedModel => {
+      model = pretrainedModel;
+      document.getElementById('predict-button').classList.remove('is-loading');
+      document.getElementById("text_read").innerText = "読み込み完了";
+    });
+
+  // ボタンを押した時の処理
+  function clickPredict() {
+    const canvas = getImageData();
+    //const predict = prediction(canvas)
+
+    trim(canvas, function(c) {
+      const predict = prediction(c)
+      document.getElementById("text_read").innerText = predict
+    });
+    //document.getElementById("text_read").innerText = predict
+  }
+
+  function clickReset() {
+    signaturePad.clear();
+    const elements = document.querySelectorAll(".accuracy");
+    elements.forEach(el => {
+      el.parentNode.classList.remove('is-selected');
+      el.innerText = '-';
+    })
+  }
+
+  // ファイル読み込み時の処理
+  const ofd = document.getElementById("selectfile");
+  ofd.addEventListener("change", function(evt) {
+    var img = null;
+    var canvas = document.createElement("canvas");
+
+    const file = evt.target.files;
+    const reader = new FileReader();
+    reader.readAsDataURL(file[0]);
+    reader.onload = function(){
+      img = new Image();
+      img.src = reader.result;
+      img.onload = function(){
+        // キャンバスに画像をセット
+        const context = canvas.getContext('2d');
+
+        // 画像のresize
+        canvas.width = width;
+        canvas.height = height;
+        context.drawImage(img, 0, 0, width, height);
+
+        // 予測結果の表示
+        const predict = prediction(canvas);
+        document.getElementById("text_read").innerText = predict;
+      }
+    }
+  }, false);
+
+  // 平均画素値2値化
+  function toBinary(src, dst, width, height) {
+    let threthould = 0;
+    const top = 255;
+    for (let i = 0; i < height; i++) {
+      for (let j = 0; j < width; j++) {
+        const idx = (j + i * width) * 4;
+        threthould += (src[idx] + src[idx + 1] + src[idx + 2]) / 3;
+      }
+    }
+    threthould /= width * height;
+    for (let i = 0; i < height; i++) {
+      for (let j = 0; j < width; j++) {
+        let idx = (j + i * width) * 4;
+        let gray = (src[idx] + src[idx + 1] + src[idx + 2]) / 3;
+        gray = (gray > threthould) ? 0 : top;
+        dst[idx] = gray;
+        dst[idx + 1] = gray;
+        dst[idx + 2] = gray;
+        dst[idx + 3] = src[idx + 3];
+      }
+    }
+  }
+
+  // canvasを引数としてtopkまでの予測を返す
+  function prediction(canvas) {
+    const context = canvas.getContext('2d');
+
+    // 2値化処理
+    const srcData = context.getImageData(0, 0, width, height);
+    const dstData = context.createImageData(width, height);
+    const src = srcData.data;
+    const dst = dstData.data;
+    toBinary(src, dst, width, height);
+
+
+    // 入力画像の出力
+    context.putImageData(srcData, 0, 0);
+    const dataurl_input = canvas.toDataURL();
+    document.getElementById("input").innerHTML = "<img src='" + dataurl_input + "'>";
+
+    // 2値化画像の出力
+    context.putImageData(dstData, 0, 0);
+    const dataurl_binary = canvas.toDataURL();
+    document.getElementById("binary").innerHTML = "<img src='" + dataurl_binary + "'>";
+
+    // 予測の表示
+    const input_data = tf.fromPixels(dstData, 1).reshape([1, height, width, 1]).cast('bool');//.cast('float32');
+
+    // topkを返す
+    const prediction = model.predict(input_data).squeeze();
+    let {values, indices} = tf.topk(prediction, 5);
+    values = values.dataSync();
+    indices = indices.dataSync();
+    let predicts = [];
+    for(let i = 0; i < indices.length; i++) {
+      predicts.push(labelToString(indices[i]) + "(" + String(indices[i]) + "):" + String((values[i]*100).toFixed(2)) + "%");
+    }
+    return predicts;
+  }
+
+  // JISコードを元に0~3035の数値をstringに変換する
+  function labelToString(label) {
+    let num = label;
+    let border = 71;
+    l1 = 36;
+    l2 = 32;
+    if(num < 5) {
+      l2 += (num+1)*2;
+    }
+    else if(num < 29) l2 += num + 6;
+    else if(num < 60) l2 += num + 7;
+    else if(num < 63) l2 += (num - 60)*2 + 68;
+    else if(num < 68) l2 += num + 10;
+    else if(num < 69) l2 += num + 11;
+    else if(num < 71) l2 += num + 13;
+    else {
+      // 漢字
+      l1 += Math.floor((num - border)/94) + 12;
+      l2 += (num - border)%94 + 1;
+    }
+    // jisコードで表現
+    num = [27, 36, 66, l1, l2, 27, 40, 66];
+    // Unicodeに変換
+    const unicodeArray = Encoding.convert(num, 'UNICODE', 'JIS');
+    // 文字列にして返す
+    const str = Encoding.codeToString(unicodeArray);
+    return String(str);
+  }
+
+  // 書いた文字を読み込んで返す
+  function getImageData() {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    context.drawImage(drawElement, 0, 0, width, height);
+    return canvas;
+  }
+
+  // 最大の四角で切り出し
+  function trim(c, func) {
+    var ctx = c.getContext('2d'),
+      copy = document.createElement('canvas').getContext('2d'),
+      pixels = ctx.getImageData(0, 0, c.width, c.height),
+      l = pixels.data.length,
+      i,
+      bound = {
+        top: null,
+        left: null,
+        right: null,
+        bottom: null
+      },
+      x, y;
+
+    for (i = 0; i < l; i += 4) {
+      if (pixels.data[i] < 255) {
+        x = (i / 4) % c.width;
+        y = ~~((i / 4) / c.width);
+
+        if (bound.top === null) {
+          bound.top = y;
+        }
+
+        if (bound.left === null) {
+          bound.left = x;
+        } else if (x < bound.left) {
+          bound.left = x;
+        }
+
+        if (bound.right === null) {
+          bound.right = x;
+        } else if (bound.right < x) {
+          bound.right = x;
+        }
+
+        if (bound.bottom === null) {
+          bound.bottom = y;
+        } else if (bound.bottom < y) {
+          bound.bottom = y;
+        }
+      }
+    }
+
+    var trimHeight = bound.bottom - bound.top,
+        trimWidth = bound.right - bound.left;
+    if(trimWidth/c.width > trimHeight/c.height) {
+      new_trimHeight = trimWidth*c.height/c.width;
+      diff = new_trimHeight - trimHeight;
+      trimHeight = new_trimHeight;
+      bound.top -= diff/2
+    }
+    else {
+      new_trimWidth = trimHeight*c.width/c.height;
+      diff = new_trimWidth - trimWidth;
+      trimWidth = new_trimWidth;
+      bound.left -= diff/2
+    }
+
+    var trimmed = ctx.getImageData(bound.left, bound.top, trimWidth, trimHeight);
+
+    copy.canvas.width = trimWidth;
+    copy.canvas.height = trimHeight;
+    copy.putImageData(trimmed, 0, 0);
+    //copy.scale(c.width/trimWidth, c.height/trimHeight);
+
+    // open new window with trimmed image:
+    const canv = copy.canvas;
+    canvasResize(canv, width, height, func);
+    //return canv;
+  }
+  function canvasResize(canvas, t_width, t_height, func){
+    var img = new Image();
+    img.onload = function(){
+        canvas.width = t_width;
+        canvas.height = t_height;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(img,0,0,t_width,t_height);
+        if(func){ func(canvas); }
+    }
+    img.src = canvas.toDataURL();
+  }
+</script>
